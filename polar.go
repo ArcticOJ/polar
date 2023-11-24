@@ -19,7 +19,7 @@ type (
 		// to resolve submission ids to submissions
 		submissions    sync.Map
 		pending        cmap.ConcurrentMap[uint32, []contest.CaseResult]
-		judges         map[string]*types.JudgeObj
+		judges         map[string]*JudgeObj
 		ctx            context.Context
 		messageHandler func(uint32) func(types.ResultType, interface{}) bool
 	}
@@ -29,6 +29,13 @@ type (
 		slice    []types.Submission
 		waitChan chan string
 	}
+
+	JudgeObj struct {
+		types.Judge
+		// internal properties
+		submissions map[uint32]struct{}
+		m           sync.Mutex
+	}
 )
 
 func NewPolar(ctx context.Context, messageHandler func(id uint32) func(t types.ResultType, data interface{}) bool) (p *Polar) {
@@ -36,7 +43,7 @@ func NewPolar(ctx context.Context, messageHandler func(id uint32) func(t types.R
 		queued:         cmap.New[*queue](),
 		pending:        cmap.NewWithCustomShardingFunction[uint32, []contest.CaseResult](defShardingFn),
 		ctx:            ctx,
-		judges:         make(map[string]*types.JudgeObj),
+		judges:         make(map[string]*JudgeObj),
 		messageHandler: messageHandler,
 	}
 	return
@@ -79,7 +86,7 @@ func (p *Polar) IsPending(id uint32) bool {
 	return p.pending.Has(id)
 }
 
-func (p *Polar) RuntimeSupported(runtime string) bool {
+func (p *Polar) RuntimeAvailable(runtime string) bool {
 	q, ok := p.queued.Get(runtime)
 	if !ok {
 		return false
@@ -87,7 +94,7 @@ func (p *Polar) RuntimeSupported(runtime string) bool {
 	return q.count.Load() > 0
 }
 
-func (p *Polar) Reject(j *types.JudgeObj, id uint32) {
+func (p *Polar) Reject(j *JudgeObj, id uint32) {
 	p.releaseSubmission(j, id)
 }
 
@@ -95,6 +102,6 @@ func (p *Polar) StartServer() {
 	go p.createServer(p.ctx)
 }
 
-func (p *Polar) GetJudges() map[string]*types.JudgeObj {
+func (p *Polar) GetJudges() map[string]*JudgeObj {
 	return p.judges
 }

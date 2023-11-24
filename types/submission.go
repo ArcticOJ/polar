@@ -9,6 +9,7 @@ type (
 		TestCount     uint16
 		PointsPerTest float64
 		Constraints   Constraints
+		AuthorID      string `msgpack:"-"`
 	}
 
 	Constraints struct {

@@ -82,23 +82,29 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 	}
 }
 
-func (p *Polar) Cancel(id uint32) {
-	sub, ok := p.submissions.LoadAndDelete(id)
+func (p *Polar) Cancel(id uint32, userId string) bool {
+	_sub, ok := p.submissions.Load(id)
 	if !ok {
-		return
+		return false
 	}
+	sub := _sub.(types.Submission)
+	if sub.AuthorID != userId {
+		return false
+	}
+	p.submissions.Delete(id)
 	// If this submission was previously marked as pending, remove it from pending, judges will automatically cancel it when failing to report result
 	if p.pending.Has(id) {
 		p.pending.Remove(id)
-		return
+		return false
 	}
-	q, ok := p.queued.Get(sub.(*types.Submission).Runtime)
+	q, ok := p.queued.Get(sub.Runtime)
 	if !ok {
-		return
+		return false
 	}
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 	q.slice = slices.DeleteFunc(q.slice, func(s types.Submission) bool {
 		return s.ID == id
 	})
+	return true
 }

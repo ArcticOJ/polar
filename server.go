@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-func (p *Polar) handleConsumer(state types.ConnState, j *types.JudgeObj, conn net.Conn) {
+func (p *Polar) handleConsumer(state types.ConnState, j *JudgeObj, conn net.Conn) {
 	var currentSubmission uint32 = math.MaxUint32
 	ctx, cancel := context.WithCancel(p.ctx)
 	defer func() {
@@ -48,7 +48,7 @@ func (p *Polar) handleConsumer(state types.ConnState, j *types.JudgeObj, conn ne
 			// mark this submission as pending
 			p.pending.Set(sub.ID, nil)
 			// bind submission to this judge
-			j.Submissions[sub.ID] = struct{}{}
+			j.submissions[sub.ID] = struct{}{}
 			if enc.Encode(sub) != nil {
 				continue
 			}
@@ -59,7 +59,7 @@ func (p *Polar) handleConsumer(state types.ConnState, j *types.JudgeObj, conn ne
 	}
 }
 
-func (p *Polar) handleProducer(j *types.JudgeObj, conn net.Conn) {
+func (p *Polar) handleProducer(j *JudgeObj, conn net.Conn) {
 	defer conn.Close()
 	s := bufio.NewScanner(conn)
 	if !s.Scan() {
@@ -71,7 +71,7 @@ func (p *Polar) handleProducer(j *types.JudgeObj, conn net.Conn) {
 		return
 	}
 	id := uint32(_id)
-	if _, ok := j.Submissions[id]; !ok {
+	if _, ok := j.submissions[id]; !ok {
 		return
 	}
 	handler := p.messageHandler(id)
@@ -85,7 +85,7 @@ func (p *Polar) handleProducer(j *types.JudgeObj, conn net.Conn) {
 			// cleanup finished submission
 			p.pending.Remove(id)
 			p.submissions.Delete(id)
-			delete(j.Submissions, id)
+			delete(j.submissions, id)
 			return
 		}
 	}
@@ -124,7 +124,7 @@ func (p *Polar) handleConnection(conn net.Conn) {
 		session *yamux.Session
 		err     error
 		state   types.ConnState
-		j       *types.JudgeObj
+		j       *JudgeObj
 	)
 	defer func() {
 		conn.Close()
@@ -135,11 +135,11 @@ func (p *Polar) handleConnection(conn net.Conn) {
 	}
 	switch state.Type {
 	case types.ConnJudge:
-		j = &types.JudgeObj{
+		j = &JudgeObj{
 			Judge:       state.Judge,
-			Submissions: make(map[uint32]struct{}),
+			submissions: make(map[uint32]struct{}),
 		}
-		j.Submissions = make(map[uint32]struct{})
+		j.submissions = make(map[uint32]struct{})
 		p.judges[state.JudgeID] = j
 		defer p.destroy(j, state.JudgeID)
 		p.RegisterRuntimes(state.Judge.Runtimes)
@@ -197,26 +197,26 @@ func (p *Polar) createServer(ctx context.Context) {
 	}
 }
 
-func (p *Polar) releaseSubmission(j *types.JudgeObj, id uint32) {
-	if _, ok := j.Submissions[id]; ok {
+func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
+	if _, ok := j.submissions[id]; ok {
 		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
 			p.pending.Remove(id)
 			// requeue submission
 			p.Push(sub.(types.Submission), true)
 		}
-		delete(j.Submissions, id)
+		delete(j.submissions, id)
 	}
 }
 
-func (p *Polar) destroy(j *types.JudgeObj, judgeId string) {
-	j.Mutex.Lock()
+func (p *Polar) destroy(j *JudgeObj, judgeId string) {
+	j.m.Lock()
 	for _, rt := range j.Runtimes {
 		if q, _ok := p.queued.Get(rt.ID); _ok {
 			q.count.Add(^uint32(0))
 		}
 	}
-	j.Mutex.Unlock()
-	for id := range j.Submissions {
+	j.m.Unlock()
+	for id := range j.submissions {
 		p.releaseSubmission(j, id)
 	}
 	delete(p.judges, judgeId)

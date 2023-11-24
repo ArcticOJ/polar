@@ -21,8 +21,7 @@ type (
 )
 
 const (
-	CaseVerdictNone CaseVerdict = iota
-	CaseVerdictAccepted
+	CaseVerdictAccepted CaseVerdict = iota
 	CaseVerdictWrongAnswer
 	CaseVerdictInternalError
 	CaseVerdictTimeLimitExceeded
