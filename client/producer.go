@@ -24,7 +24,7 @@ func (p *Polar) NewProducer(id uint32) (prod *Producer, e error) {
 	if e != nil {
 		return
 	}
-	prod.enc = msgpack.NewEncoder(prod.conn).UseCompactEncoding(true)
+	prod.enc = msgpack.NewEncoder(prod.conn)
 	return
 }
 
