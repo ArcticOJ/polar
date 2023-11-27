@@ -186,9 +186,7 @@ func (p *Polar) handleConnection(conn net.Conn) {
 }
 
 func (p *Polar) createServer(ctx context.Context) {
-	conf := net.ListenConfig{
-		KeepAlive: time.Second,
-	}
+	conf := net.ListenConfig{}
 	l, err := conf.Listen(ctx, "tcp", net.JoinHostPort(config.Config.Host, fmt.Sprint(config.Config.Polar.Port)))
 	logger.Panic(err, "failed to initialize polar")
 	logger.Polar.Info().Msgf("polar listening on port %d", config.Config.Polar.Port)

@@ -8,6 +8,7 @@ import (
 	"github.com/vmihailenco/msgpack"
 	"io"
 	"net"
+	"time"
 )
 
 type Polar struct {
@@ -15,6 +16,13 @@ type Polar struct {
 	producerSession *yamux.Session
 	id              string
 	CloseChan       chan types.ConnType
+}
+
+func clientConf() (conf *yamux.Config) {
+	conf = yamux.DefaultConfig()
+	conf.EnableKeepAlive = true
+	conf.KeepAliveInterval = time.Second
+	return
 }
 
 func New(ctx context.Context, host string, port uint16, j types.Judge) (p *Polar, e error) {
@@ -29,7 +37,8 @@ func New(ctx context.Context, host string, port uint16, j types.Judge) (p *Polar
 	if p.id, e = registerJudge(consumerConn, j); e != nil {
 		return
 	}
-	if p.consumerSession, e = yamux.Client(consumerConn, nil); e != nil {
+	conf := clientConf()
+	if p.consumerSession, e = yamux.Client(consumerConn, conf); e != nil {
 		return
 	}
 	if producerConn, e = newConn(ctx, host, port); e != nil {
@@ -38,7 +47,7 @@ func New(ctx context.Context, host string, port uint16, j types.Judge) (p *Polar
 	if e = registerProducerConn(producerConn, p.id); e != nil {
 		return
 	}
-	p.producerSession, e = yamux.Client(producerConn, nil)
+	p.producerSession, e = yamux.Client(producerConn, conf)
 	return
 }
 
