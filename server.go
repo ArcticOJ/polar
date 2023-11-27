@@ -141,14 +141,18 @@ func (p *Polar) handleConnection(conn net.Conn) {
 			Judge:       state.Judge,
 			submissions: make(map[uint32]struct{}),
 		}
+		p.jm.Lock()
 		p.judges[state.JudgeID] = j
+		p.jm.Unlock()
 		defer p.destroy(j, state.JudgeID)
 		p.RegisterRuntimes(state.Judge.Runtimes)
 		break
 	case types.ConnProducer:
-		if _j, ok := p.judges[state.JudgeID]; ok {
-			j = _j
-		} else {
+		var ok bool
+		p.jm.RLock()
+		j, ok = p.judges[state.JudgeID]
+		p.jm.RUnlock()
+		if !ok {
 			return
 		}
 		break
@@ -214,7 +218,9 @@ func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 }
 
 func (p *Polar) destroy(j *JudgeObj, judgeId string) {
+	p.jm.Lock()
 	delete(p.judges, judgeId)
+	p.jm.Unlock()
 	j.m.Lock()
 	for _, rt := range j.Runtimes {
 		if q, _ok := p.queued.Load(rt.ID); _ok {
