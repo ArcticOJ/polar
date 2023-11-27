@@ -46,9 +46,11 @@ func (p *Polar) handleConsumer(state types.ConnState, j *JudgeObj, conn net.Conn
 			}
 			currentSubmission = sub.ID
 			// mark this submission as pending
-			p.pending.Set(sub.ID, nil)
+			p.pending.Store(sub.ID, nil)
 			// bind submission to this judge
+			j.m.Lock()
 			j.submissions[sub.ID] = struct{}{}
+			j.m.Unlock()
 			if enc.Encode(sub) != nil {
 				continue
 			}
@@ -83,7 +85,7 @@ func (p *Polar) handleProducer(j *JudgeObj, conn net.Conn) {
 		}
 		if handler(args.Type, args.Data) {
 			// cleanup finished submission
-			p.pending.Remove(id)
+			p.pending.Delete(id)
 			p.submissions.Delete(id)
 			delete(j.submissions, id)
 			return
@@ -139,7 +141,6 @@ func (p *Polar) handleConnection(conn net.Conn) {
 			Judge:       state.Judge,
 			submissions: make(map[uint32]struct{}),
 		}
-		j.submissions = make(map[uint32]struct{})
 		p.judges[state.JudgeID] = j
 		defer p.destroy(j, state.JudgeID)
 		p.RegisterRuntimes(state.Judge.Runtimes)
@@ -198,20 +199,25 @@ func (p *Polar) createServer(ctx context.Context) {
 }
 
 func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
+	p.jm.Lock()
 	if _, ok := j.submissions[id]; ok {
-		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
-			p.pending.Remove(id)
-			// requeue submission
-			p.Push(sub.(types.Submission), true)
-		}
 		delete(j.submissions, id)
+		p.jm.Unlock()
+		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
+			p.pending.Delete(id)
+			// requeue submission
+			p.Push(sub, true)
+		}
+		return
 	}
+	p.jm.Unlock()
 }
 
 func (p *Polar) destroy(j *JudgeObj, judgeId string) {
+	delete(p.judges, judgeId)
 	j.m.Lock()
 	for _, rt := range j.Runtimes {
-		if q, _ok := p.queued.Get(rt.ID); _ok {
+		if q, _ok := p.queued.Load(rt.ID); _ok {
 			q.count.Add(^uint32(0))
 		}
 	}
@@ -219,5 +225,4 @@ func (p *Polar) destroy(j *JudgeObj, judgeId string) {
 	for id := range j.submissions {
 		p.releaseSubmission(j, id)
 	}
-	delete(p.judges, judgeId)
 }

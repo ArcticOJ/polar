@@ -4,8 +4,8 @@ go 1.21
 
 require (
 	github.com/hashicorp/yamux v0.1.1
+	github.com/mhmtszr/concurrent-swiss-map v1.0.5
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/vmihailenco/msgpack v4.0.4+incompatible
 )
 

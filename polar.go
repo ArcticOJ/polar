@@ -4,22 +4,20 @@ import (
 	"context"
 	"github.com/ArcticOJ/blizzard/v0/db/models/contest"
 	"github.com/ArcticOJ/polar/v0/types"
-	cmap "github.com/orcaman/concurrent-map/v2"
+	csmap "github.com/mhmtszr/concurrent-swiss-map"
 	"sync"
 	"sync/atomic"
 )
 
-func defShardingFn(u uint32) uint32 {
-	return u
-}
-
 type (
 	Polar struct {
-		queued cmap.ConcurrentMap[string, *queue]
+		queued *csmap.CsMap[string, *queue]
 		// to resolve submission ids to submissions
-		submissions    sync.Map
-		pending        cmap.ConcurrentMap[uint32, []contest.CaseResult]
-		judges         map[string]*JudgeObj
+		submissions *csmap.CsMap[uint32, types.Submission]
+		pending     *csmap.CsMap[uint32, []contest.CaseResult]
+		judges      map[string]*JudgeObj
+		// mutex for reading/writing to judges
+		jm             sync.RWMutex
 		ctx            context.Context
 		messageHandler func(uint32) func(types.ResultType, interface{}) bool
 	}
@@ -33,15 +31,17 @@ type (
 	JudgeObj struct {
 		types.Judge
 		// internal properties
+		// current submissions
 		submissions map[uint32]struct{}
-		m           sync.Mutex
+		m           sync.RWMutex
 	}
 )
 
 func NewPolar(ctx context.Context, messageHandler func(id uint32) func(t types.ResultType, data interface{}) bool) (p *Polar) {
 	p = &Polar{
-		queued:         cmap.New[*queue](),
-		pending:        cmap.NewWithCustomShardingFunction[uint32, []contest.CaseResult](defShardingFn),
+		queued:         csmap.Create[string, *queue](),
+		pending:        csmap.Create[uint32, []contest.CaseResult](),
+		submissions:    csmap.Create[uint32, types.Submission](),
 		ctx:            ctx,
 		judges:         make(map[string]*JudgeObj),
 		messageHandler: messageHandler,
@@ -52,30 +52,25 @@ func NewPolar(ctx context.Context, messageHandler func(id uint32) func(t types.R
 func (p *Polar) RegisterRuntimes(runtimes []types.Runtime) {
 	for _, rt := range runtimes {
 		// register a runtime if not present or update it
-		p.queued.Upsert(rt.ID, &queue{
+		p.queued.SetIfAbsent(rt.ID, &queue{
 			waitChan: make(chan string, 1),
-		}, func(exist bool, q *queue, newq *queue) *queue {
-			if !exist {
-				newq.count.Add(1)
-				return newq
-			}
-			q.count.Add(1)
-			return q
 		})
+		q, _ := p.queued.Load(rt.ID)
+		q.count.Add(1)
 	}
 }
 
 func (p *Polar) UpdateResult(id uint32, result contest.CaseResult) bool {
-	res, ok := p.pending.Get(id)
+	res, ok := p.pending.Load(id)
 	if !ok {
 		return false
 	}
-	p.pending.Set(id, append(res, result))
+	p.pending.Store(id, append(res, result))
 	return true
 }
 
 func (p *Polar) GetResult(id uint32) []contest.CaseResult {
-	r, ok := p.pending.Get(id)
+	r, ok := p.pending.Load(id)
 	if !ok {
 		return nil
 	}
@@ -87,7 +82,7 @@ func (p *Polar) IsPending(id uint32) bool {
 }
 
 func (p *Polar) RuntimeAvailable(runtime string) bool {
-	q, ok := p.queued.Get(runtime)
+	q, ok := p.queued.Load(runtime)
 	if !ok {
 		return false
 	}
@@ -103,5 +98,7 @@ func (p *Polar) StartServer() {
 }
 
 func (p *Polar) GetJudges() map[string]*JudgeObj {
+	p.jm.RLock()
+	defer p.jm.RUnlock()
 	return p.judges
 }

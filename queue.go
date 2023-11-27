@@ -21,21 +21,17 @@ func (q *queue) pop() *types.Submission {
 func (p *Polar) Populate(s []types.Submission) {
 	for _, _s := range s {
 		p.submissions.Store(_s.ID, _s)
-		p.queued.Upsert(_s.Runtime, &queue{
-			slice:    []types.Submission{_s},
+		p.queued.SetIfAbsent(_s.Runtime, &queue{
+			slice:    nil,
 			waitChan: make(chan string, 1),
-		}, func(exist bool, q *queue, newq *queue) *queue {
-			if !exist {
-				return newq
-			}
-			q.slice = append(q.slice, _s)
-			return q
 		})
+		q, _ := p.queued.Load(_s.Runtime)
+		q.slice = append(q.slice, _s)
 	}
 }
 
 func (p *Polar) Push(s types.Submission, force bool) error {
-	q, ok := p.queued.Get(s.Runtime)
+	q, ok := p.queued.Load(s.Runtime)
 	// count of consumers with this runtime waiting
 	cnt := q.count.Load()
 	if !ok || cnt == 0 && !force {
@@ -56,7 +52,7 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 		Chan: reflect.ValueOf(ctx.Done()),
 	}}
 	for _, rt := range runtimes {
-		if q, ok := p.queued.Get(rt.ID); ok {
+		if q, ok := p.queued.Load(rt.ID); ok {
 			if sub := q.pop(); sub != nil {
 				return sub
 			}
@@ -72,7 +68,7 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 		if !received || chosen == 0 {
 			return nil
 		}
-		q, ok := p.queued.Get(val.String())
+		q, ok := p.queued.Load(val.String())
 		if !ok {
 			return nil
 		}
@@ -83,21 +79,19 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 }
 
 func (p *Polar) Cancel(id uint32, userId string) bool {
-	_sub, ok := p.submissions.Load(id)
+	sub, ok := p.submissions.Load(id)
 	if !ok {
 		return false
 	}
-	sub := _sub.(types.Submission)
 	if sub.AuthorID != userId {
 		return false
 	}
 	p.submissions.Delete(id)
 	// If this submission was previously marked as pending, remove it from pending, judges will automatically cancel it when failing to report result
-	if p.pending.Has(id) {
-		p.pending.Remove(id)
+	if p.pending.Delete(id) {
 		return false
 	}
-	q, ok := p.queued.Get(sub.Runtime)
+	q, ok := p.queued.Load(sub.Runtime)
 	if !ok {
 		return false
 	}
