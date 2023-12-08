@@ -43,5 +43,5 @@ const (
 	ResultNone ResultType = iota + 1
 	ResultCase
 	ResultFinal
-	ResultAnnouncement
+	ResultAck
 )

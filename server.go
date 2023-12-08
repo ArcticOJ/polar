@@ -73,25 +73,32 @@ func (p *Polar) handleProducer(j *JudgeObj, conn net.Conn) {
 		return
 	}
 	id := uint32(_id)
-	if _, ok := j.submissions[id]; !ok {
+	j.m.RLock()
+	_, isPending := j.submissions[id]
+	j.m.RUnlock()
+	if !isPending {
 		return
 	}
 	handler := p.messageHandler(id)
 	for s.Scan() {
+		// submission is cancelled
+		if !p.IsPending(id) {
+			break
+		}
 		buf := s.Bytes()
 		var args types.ReportArgs
 		if e = msgpack.Unmarshal(buf, &args); e != nil {
 			continue
 		}
 		if handler(args.Type, args.Data) {
-			// cleanup finished submission
 			p.pending.Delete(id)
 			p.submissions.Delete(id)
-			delete(j.submissions, id)
-			return
+			break
 		}
 	}
-	handler(types.ResultNone, nil)
+	j.m.Lock()
+	delete(j.submissions, id)
+	j.m.Unlock()
 }
 
 func (p *Polar) handleRegistration(conn net.Conn) (state types.ConnState, e error) {
@@ -143,6 +150,7 @@ func (p *Polar) handleConnection(conn net.Conn) {
 		}
 		p.jm.Lock()
 		p.judges[state.JudgeID] = j
+		p.parallelism += p.parallelism
 		p.jm.Unlock()
 		defer p.destroy(j, state.JudgeID)
 		p.RegisterRuntimes(state.Judge.Runtimes)
@@ -201,8 +209,11 @@ func (p *Polar) createServer(ctx context.Context) {
 }
 
 func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
-	p.jm.Lock()
-	if _, ok := j.submissions[id]; ok {
+	p.jm.RLock()
+	_, isPending := j.submissions[id]
+	p.jm.RUnlock()
+	if isPending {
+		p.jm.Lock()
 		delete(j.submissions, id)
 		p.jm.Unlock()
 		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
@@ -212,11 +223,11 @@ func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 		}
 		return
 	}
-	p.jm.Unlock()
 }
 
 func (p *Polar) destroy(j *JudgeObj, judgeId string) {
 	p.jm.Lock()
+	p.parallelism -= j.Parallelism
 	delete(p.judges, judgeId)
 	p.jm.Unlock()
 	j.m.Lock()
@@ -225,8 +236,8 @@ func (p *Polar) destroy(j *JudgeObj, judgeId string) {
 			q.count.Add(^uint32(0))
 		}
 	}
-	j.m.Unlock()
 	for id := range j.submissions {
 		p.releaseSubmission(j, id)
 	}
+	j.m.Unlock()
 }

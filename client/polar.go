@@ -20,7 +20,6 @@ type Polar struct {
 
 func clientConf() (conf *yamux.Config) {
 	conf = yamux.DefaultConfig()
-	conf.EnableKeepAlive = true
 	conf.KeepAliveInterval = time.Second
 	return
 }

@@ -15,6 +15,8 @@ type (
 		// to resolve submission ids to submissions
 		submissions *csmap.CsMap[uint32, types.Submission]
 		pending     *csmap.CsMap[uint32, []contest.CaseResult]
+		// maximum concurrent submissions
+		parallelism uint16
 		judges      map[string]*JudgeObj
 		// mutex for reading/writing to judges
 		jm             sync.RWMutex

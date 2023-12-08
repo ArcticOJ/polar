@@ -3,17 +3,15 @@ package types
 type Command = string
 
 const (
-	// Register a judge (consumer-side) or register a producer (producer-side)
+	// Register a judge (consumer-side) or register a producer cluster (producer-side)
 	CommandRegister Command = "register"
 	// Pop a submission from queue and mark as pending (consumer-side)
-	CommandConsume = "consume"
+	CommandConsume Command = "consume"
 	// Reject a submission
-	CommandReject = "reject"
+	CommandReject Command = "reject"
 
-	// Report either test case result or final result (producer-side)
-	CommandReport = "report"
-	// Announce stages of submission process (compilation, completion, cancellation) (producer-side)
-	CommandAnnounce = "announce"
+	// Report either acknowledgement, test case result or final result (producer-side)
+	CommandReport Command = "report"
 )
 
 type (

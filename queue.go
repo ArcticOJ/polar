@@ -7,6 +7,8 @@ import (
 	"slices"
 )
 
+// TODO: use unified consumer and distribute tasks among consumers using sync.Cond
+
 func (q *queue) pop() *types.Submission {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
@@ -41,7 +43,10 @@ func (p *Polar) Push(s types.Submission, force bool) error {
 	q.slice = append(q.slice, s)
 	if cnt > 0 {
 		// notify ONE consumer waiting on this channel
-		q.waitChan <- s.Runtime
+		select {
+		case q.waitChan <- s.Runtime:
+		default:
+		}
 	}
 	return nil
 }
@@ -76,6 +81,14 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 			return sub
 		}
 	}
+}
+
+func (p *Polar) GetSubmission(id uint32) *types.Submission {
+	sub, ok := p.submissions.Load(id)
+	if !ok {
+		return nil
+	}
+	return &sub
 }
 
 func (p *Polar) Cancel(id uint32, userId string) bool {
