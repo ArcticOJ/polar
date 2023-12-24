@@ -1,96 +1,78 @@
 package polar
 
 import (
-	"bufio"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"github.com/ArcticOJ/blizzard/v0/config"
+	"github.com/ArcticOJ/blizzard/v0/db/models/contest"
 	"github.com/ArcticOJ/blizzard/v0/logger"
+	"github.com/ArcticOJ/polar/v0/shared"
 	"github.com/ArcticOJ/polar/v0/types"
 	"github.com/hashicorp/yamux"
 	"github.com/mitchellh/mapstructure"
-	"github.com/vmihailenco/msgpack"
 	"math"
 	"net"
-	"strconv"
+	"strings"
 	"time"
 )
 
-func (p *Polar) handleConsumer(state types.ConnState, j *JudgeObj, conn net.Conn) {
+func (p *Polar) handleConsumer(ctx context.Context, j *JudgeObj, conn *shared.EncodedConn) {
 	var currentSubmission uint32 = math.MaxUint32
-	ctx, cancel := context.WithCancel(p.ctx)
 	defer func() {
-		cancel()
 		if currentSubmission != math.MaxUint32 {
 			p.releaseSubmission(j, currentSubmission)
 		}
 	}()
-	go func() {
-		<-ctx.Done()
-		conn.Close()
-	}()
-	s := bufio.NewScanner(conn)
-	enc := msgpack.NewEncoder(conn)
-	for s.Scan() {
+	for conn.Scan() {
 		var req types.Request
-		if e := msgpack.Unmarshal(s.Bytes(), &req); e != nil {
+		if e := conn.Read(&req); e != nil {
 			continue
 		}
 		switch req.Command {
 		case types.CommandConsume:
 			currentSubmission = math.MaxUint32
-			sub := p.Pop(ctx, state.Judge.Runtimes)
+			sub := p.Pop(ctx, j.Runtimes)
 			if sub == nil {
 				continue
 			}
 			currentSubmission = sub.ID
 			// mark this submission as pending
-			p.pending.Store(sub.ID, nil)
+			p.pending.Store(sub.ID, make([]contest.CaseResult, sub.TestCount))
 			// bind submission to this judge
 			j.m.Lock()
 			j.submissions[sub.ID] = struct{}{}
 			j.m.Unlock()
-			if enc.Encode(sub) != nil {
-				continue
-			}
-			if _, e := conn.Write([]byte("\n")); e != nil {
-				continue
+			// this submission cannot be consumed, so better requeue it
+			if conn.Write(sub) != nil {
+				p.releaseSubmission(j, sub.ID)
 			}
 		}
 	}
 }
 
-func (p *Polar) handleProducer(j *JudgeObj, conn net.Conn) {
-	defer conn.Close()
-	s := bufio.NewScanner(conn)
-	if !s.Scan() {
-		return
-	}
-	// grab bound submission from the first payload
-	_id, e := strconv.ParseUint(s.Text(), 10, 32)
-	if e != nil {
-		return
-	}
-	id := uint32(_id)
+func (p *Polar) handleProducer(j *JudgeObj, conn *shared.EncodedConn, id uint32) {
+	logger.Polar.Debug().Str("judge", j.Name).Stringer("addr", conn.Conn().RemoteAddr()).Uint32("submission", id).Msg("producer connected")
 	j.m.RLock()
 	_, isPending := j.submissions[id]
 	j.m.RUnlock()
 	if !isPending {
 		return
 	}
+	isDone := false
 	handler := p.messageHandler(id)
-	for s.Scan() {
+	for conn.Scan() {
 		// submission is cancelled
 		if !p.IsPending(id) {
+			isDone = true
 			break
 		}
-		buf := s.Bytes()
 		var args types.ReportArgs
-		if e = msgpack.Unmarshal(buf, &args); e != nil {
+		if conn.Read(&args) != nil {
 			continue
 		}
 		if handler(args.Type, args.Data) {
+			isDone = true
 			p.pending.Delete(id)
 			p.submissions.Delete(id)
 			break
@@ -99,103 +81,91 @@ func (p *Polar) handleProducer(j *JudgeObj, conn net.Conn) {
 	j.m.Lock()
 	delete(j.submissions, id)
 	j.m.Unlock()
+	// if judge dies or current submission is rejected, requeue current submission
+	if !isDone {
+		if sub, ok := p.submissions.Load(id); ok {
+			p.pending.Delete(id)
+			// requeue submission
+			p.Push(sub, true)
+		}
+	}
 }
 
-func (p *Polar) handleRegistration(conn net.Conn) (state types.ConnState, e error) {
-	var args types.RegisterArgs
-	s := bufio.NewScanner(conn)
-	if !s.Scan() {
-		e = types.ErrReqDeserialize
+func (p *Polar) handleJudge(j types.Judge, conn *shared.EncodedConn) {
+	id := hex.EncodeToString([]byte(fmt.Sprintf("%s-%d", j.Name, time.Now().UnixMilli())))
+	obj := &JudgeObj{
+		Judge:       j,
+		submissions: make(map[uint32]struct{}),
+	}
+	logger.Polar.Debug().
+		Str("name", j.Name).
+		Str("id", id).
+		Stringer("addr", conn.Conn().RemoteAddr()).
+		Msg("judge connected")
+	p.jm.Lock()
+	p.judges[id] = obj
+	p.jm.Unlock()
+	p.RegisterRuntimes(obj.Runtimes)
+	defer p.destroy(id)
+	if conn.Write(id) != nil {
 		return
 	}
-	if e = msgpack.Unmarshal(s.Bytes(), &args); e != nil {
+	s, e := yamux.Server(conn.Conn(), shared.MuxConfig())
+	if e != nil {
+		logger.Polar.Debug().Err(e).Stringer("addr", conn.Conn().RemoteAddr()).Msg("error multiplexing connection")
 		return
 	}
-	switch state.Type = args.Type; state.Type {
-	case types.ConnJudge:
-		if e = mapstructure.Decode(args.Data, &state.Judge); e != nil {
+	ctx, cancel := context.WithCancel(p.ctx)
+	go func() {
+		<-s.CloseChan()
+		cancel()
+	}()
+	for {
+		c, e := s.Accept()
+		if e != nil {
 			return
 		}
-		state.JudgeID = hex.EncodeToString([]byte(fmt.Sprintf("%s-%d", state.Judge.Name, time.Now().UnixMilli())))
-		_, e = conn.Write([]byte(state.JudgeID + "\n"))
-	case types.ConnProducer:
-		if id, ok := args.Data.(string); ok {
-			state.JudgeID = id
-		} else {
-			e = types.ErrReqDeserialize
-		}
+		go p.handleConsumer(ctx, obj, shared.NewEncodedConn(c))
 	}
-	return
 }
 
-func (p *Polar) handleConnection(conn net.Conn) {
-	var (
-		session *yamux.Session
-		err     error
-		state   types.ConnState
-		j       *JudgeObj
-	)
-	defer func() {
-		conn.Close()
-	}()
-	// handle registration from the first payload
-	if state, err = p.handleRegistration(conn); err != nil {
-		logger.Polar.Debug().Err(err).Msgf("error handling registration from '%s'", conn.RemoteAddr())
+func (p *Polar) handleConn(conn net.Conn) {
+	defer conn.Close()
+	c := shared.NewEncodedConn(conn)
+	if !c.Scan() {
+		return
 	}
-	switch state.Type {
+	var args types.RegisterArgs
+	// parse the first payload as args
+	if e := c.Read(&args); e != nil {
+		return
+	}
+	if strings.TrimSpace(args.Secret) != strings.TrimSpace(config.Config.Polar.Secret) {
+		logger.Polar.Warn().Stringer("type", args.Type).Stringer("addr", conn.RemoteAddr()).Msg("client tried to connect with invalid secret")
+		return
+	}
+	switch args.Type {
 	case types.ConnJudge:
-		j = &JudgeObj{
-			Judge:       state.Judge,
-			submissions: make(map[uint32]struct{}),
+		var judge types.Judge
+		if mapstructure.Decode(args.Data, &judge) != nil {
+			return
 		}
-		p.jm.Lock()
-		p.judges[state.JudgeID] = j
-		p.parallelism += p.parallelism
-		p.jm.Unlock()
-		defer p.destroy(j, state.JudgeID)
-		p.RegisterRuntimes(state.Judge.Runtimes)
-		break
+		p.handleJudge(judge, c)
 	case types.ConnProducer:
-		var ok bool
 		p.jm.RLock()
-		j, ok = p.judges[state.JudgeID]
+		j := p.judges[args.JudgeID]
 		p.jm.RUnlock()
+		id, ok := args.Data.(uint32)
 		if !ok {
 			return
 		}
-		break
-	default:
-		return
-	}
-	conf := yamux.DefaultConfig()
-	conf.KeepAliveInterval = time.Second
-	session, err = yamux.Server(conn, conf)
-	if err != nil {
-		logger.Polar.Debug().Err(err).Stringer("addr", session.RemoteAddr()).Msgf("error multiplexing connection")
-		return
-	}
-	for {
-		sconn, e := session.Accept()
-		if e != nil {
-			if session.IsClosed() {
-				logger.Polar.Debug().Stringer("addr", session.RemoteAddr()).Msg("session closed")
-				break
-			}
-			logger.Polar.Debug().Err(e).Stringer("addr", sconn.RemoteAddr()).Msgf("error accepting connection")
-			continue
-		}
-		switch state.Type {
-		case types.ConnJudge:
-			go p.handleConsumer(state, j, sconn)
-		case types.ConnProducer:
-			go p.handleProducer(j, sconn)
-		}
+		p.handleProducer(j, c, id)
 	}
 }
 
-func (p *Polar) createServer(ctx context.Context) {
+func (p *Polar) createServer() {
 	conf := net.ListenConfig{}
-	l, err := conf.Listen(ctx, "tcp", net.JoinHostPort(config.Config.Host, fmt.Sprint(config.Config.Polar.Port)))
+	l, err := conf.Listen(p.ctx, "tcp", net.JoinHostPort(config.Config.Host, fmt.Sprint(config.Config.Polar.Port)))
 	logger.Panic(err, "failed to initialize polar")
 	logger.Polar.Info().Msgf("polar listening on port %d", config.Config.Polar.Port)
 	for {
@@ -204,7 +174,7 @@ func (p *Polar) createServer(ctx context.Context) {
 			logger.Polar.Debug().Err(err).Stringer("addr", conn.RemoteAddr()).Msg("error accepting connection")
 			continue
 		}
-		go p.handleConnection(conn)
+		go p.handleConn(conn)
 	}
 }
 
@@ -225,19 +195,20 @@ func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 	}
 }
 
-func (p *Polar) destroy(j *JudgeObj, judgeId string) {
+func (p *Polar) destroy(judgeId string) {
 	p.jm.Lock()
-	p.parallelism -= j.Parallelism
+	judgeObj := p.judges[judgeId]
+	p.parallelism -= judgeObj.Parallelism
 	delete(p.judges, judgeId)
 	p.jm.Unlock()
-	j.m.Lock()
-	for _, rt := range j.Runtimes {
+	judgeObj.m.Lock()
+	for _, rt := range judgeObj.Runtimes {
 		if q, _ok := p.queued.Load(rt.ID); _ok {
 			q.count.Add(^uint32(0))
 		}
 	}
-	for id := range j.submissions {
-		p.releaseSubmission(j, id)
+	for id := range judgeObj.submissions {
+		p.releaseSubmission(judgeObj, id)
 	}
-	j.m.Unlock()
+	judgeObj.m.Unlock()
 }

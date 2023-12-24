@@ -29,7 +29,6 @@ type (
 		slice    []types.Submission
 		waitChan chan string
 	}
-
 	JudgeObj struct {
 		types.Judge
 		// internal properties
@@ -67,7 +66,8 @@ func (p *Polar) UpdateResult(id uint32, result contest.CaseResult) bool {
 	if !ok {
 		return false
 	}
-	p.pending.Store(id, append(res, result))
+	res[result.ID-1] = result
+	p.pending.Store(id, res)
 	return true
 }
 
@@ -96,7 +96,7 @@ func (p *Polar) Reject(j *JudgeObj, id uint32) {
 }
 
 func (p *Polar) StartServer() {
-	go p.createServer(p.ctx)
+	go p.createServer()
 }
 
 func (p *Polar) GetJudges() map[string]*JudgeObj {

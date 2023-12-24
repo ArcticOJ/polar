@@ -2,43 +2,38 @@ package polar
 
 import (
 	"fmt"
+	"github.com/ArcticOJ/igloo/v0/config"
+	"github.com/ArcticOJ/polar/v0/shared"
 	"github.com/ArcticOJ/polar/v0/types"
-	"github.com/vmihailenco/msgpack"
 	"net"
+	"time"
 )
 
 type Producer struct {
 	id   uint32
-	conn net.Conn
-	enc  *msgpack.Encoder
+	conn *shared.EncodedConn
 }
 
 func (p *Polar) NewProducer(id uint32) (prod *Producer, e error) {
+	var conn net.Conn
 	prod = &Producer{id: id}
-	prod.conn, e = p.producerSession.Open()
+	conn, e = net.DialTimeout("tcp", net.JoinHostPort(p.host, fmt.Sprint(p.port)), time.Second*5)
 	if e != nil {
 		return
 	}
+	prod.conn = shared.NewEncodedConn(conn)
 	// set bound submission to given ID
-	_, e = prod.conn.Write([]byte(fmt.Sprintf("%d\n", id)))
-	if e != nil {
-		return
-	}
-	prod.enc = msgpack.NewEncoder(prod.conn)
+	e = prod.conn.Write(types.RegisterArgs{
+		Type:    types.ConnProducer,
+		JudgeID: p.id,
+		Secret:  config.Config.Polar.Secret,
+		Data:    id,
+	})
 	return
 }
 
 func (p *Producer) Report(_type types.ResultType, data interface{}) error {
-	return p.send(types.ReportArgs{Type: _type, Data: data})
-}
-
-func (p *Producer) send(data interface{}) (e error) {
-	if e = p.enc.Encode(data); e != nil {
-		return
-	}
-	// terminate message with newline
-	_, e = p.conn.Write([]byte("\n"))
-	return
+	return p.conn.Write(types.ReportArgs{Type: _type, Data: data})
 }
 
 func (p *Producer) Close() {

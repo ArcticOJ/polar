@@ -10,14 +10,16 @@ type (
 		Event string
 		Data  interface{}
 	}
-	ConnState struct {
-		Type    ConnType
-		JudgeID string
-		Judge   Judge
-	}
 )
 
 const (
 	ConnJudge ConnType = iota + 1
 	ConnProducer
 )
+
+func (t ConnType) String() string {
+	if t == ConnJudge {
+		return "JUDGE"
+	}
+	return "PRODUCER"
+}
