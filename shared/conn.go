@@ -26,9 +26,7 @@ func (c *EncodedConn) Write(obj interface{}) (e error) {
 	if e = c._writer.Encode(obj); e != nil {
 		return e
 	}
-	// terminate payload with newline
-	_, e = c.conn.Write([]byte("\n"))
-	return
+	return c.Flush()
 }
 
 func (c *EncodedConn) Scan() bool {
@@ -45,4 +43,9 @@ func (c *EncodedConn) Close() error {
 
 func (c *EncodedConn) Conn() net.Conn {
 	return c.conn
+}
+
+func (c *EncodedConn) Flush() error {
+	_, e := c.conn.Write([]byte("\r\n"))
+	return e
 }

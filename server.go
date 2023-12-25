@@ -137,7 +137,7 @@ func (p *Polar) handleConn(conn net.Conn) {
 	}
 	var args types.RegisterArgs
 	// parse the first payload as args
-	if e := c.Read(&args); e != nil {
+	if c.Read(&args) != nil {
 		return
 	}
 	if strings.TrimSpace(args.Secret) != strings.TrimSpace(config.Config.Polar.Secret) {

@@ -13,9 +13,9 @@ import (
 )
 
 type Polar struct {
+	host string
+	port uint16
 	// a single connection is probably enough to handle submissions
-	host            string
-	port            uint16
 	consumerConn    *shared.EncodedConn
 	consumerSession *yamux.Session
 	id              string
@@ -41,6 +41,10 @@ func New(_ctx context.Context, j types.Judge) (p *Polar, e error) {
 	p.consumerConn = shared.NewEncodedConn(conn)
 	p.id, e = p.registerJudge(j)
 	if e != nil {
+		return
+	}
+	if p.id == "" {
+		e = types.ErrNoId
 		return
 	}
 	p.consumerSession, e = yamux.Client(conn, shared.MuxConfig())
