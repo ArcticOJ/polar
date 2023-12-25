@@ -1,40 +1,38 @@
 package shared
 
 import (
-	"bufio"
-	"github.com/vmihailenco/msgpack"
+	"encoding/json"
 	"net"
 )
 
 type (
 	EncodedConn struct {
 		conn     net.Conn
-		_writer  *msgpack.Encoder
-		_scanner *bufio.Scanner
+		_encoder *json.Encoder
+		_decoder *json.Decoder
 	}
 )
 
-func NewEncodedConn(conn net.Conn) *EncodedConn {
-	return &EncodedConn{
+func NewEncodedConn(conn net.Conn) (c *EncodedConn) {
+	c = &EncodedConn{
 		conn:     conn,
-		_scanner: bufio.NewScanner(conn),
-		_writer:  msgpack.NewEncoder(conn),
+		_decoder: json.NewDecoder(conn),
+		_encoder: json.NewEncoder(conn),
 	}
+	c._decoder.UseNumber()
+	return
 }
 
 func (c *EncodedConn) Write(obj interface{}) (e error) {
-	if e = c._writer.Encode(obj); e != nil {
-		return e
-	}
-	return c.Flush()
+	return c._encoder.Encode(obj)
 }
 
-func (c *EncodedConn) Scan() bool {
-	return c._scanner.Scan()
+func (c *EncodedConn) More() bool {
+	return c._decoder.More()
 }
 
 func (c *EncodedConn) Read(obj interface{}) error {
-	return msgpack.Unmarshal(c._scanner.Bytes(), &obj)
+	return c._decoder.Decode(&obj)
 }
 
 func (c *EncodedConn) Close() error {
@@ -43,9 +41,4 @@ func (c *EncodedConn) Close() error {
 
 func (c *EncodedConn) Conn() net.Conn {
 	return c.conn
-}
-
-func (c *EncodedConn) Flush() error {
-	_, e := c.conn.Write([]byte("\r\n"))
-	return e
 }

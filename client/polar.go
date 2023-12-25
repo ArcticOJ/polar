@@ -34,7 +34,7 @@ func New(_ctx context.Context, j types.Judge) (p *Polar, e error) {
 		host:      config.Config.Polar.Host,
 		port:      config.Config.Polar.Port,
 	}
-	conn, e = net.DialTimeout("tcp", net.JoinHostPort(p.host, fmt.Sprint(p.port)), time.Second)
+	conn, e = net.DialTimeout("tcp", net.JoinHostPort(p.host, fmt.Sprint(p.port)), time.Second*5)
 	if e != nil {
 		return
 	}
@@ -65,7 +65,7 @@ func (p *Polar) registerJudge(j types.Judge) (id string, e error) {
 	if e != nil {
 		return
 	}
-	if !p.consumerConn.Scan() {
+	if !p.consumerConn.More() {
 		e = io.EOF
 		return
 	}

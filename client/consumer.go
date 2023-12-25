@@ -37,7 +37,7 @@ func (c *Consumer) Consume() error {
 		}); e != nil {
 			return e
 		}
-		if !c.conn.Scan() {
+		if !c.conn.More() {
 			return io.EOF
 		}
 		var sub types.Submission

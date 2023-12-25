@@ -3,6 +3,7 @@ package polar
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"github.com/ArcticOJ/blizzard/v0/config"
 	"github.com/ArcticOJ/blizzard/v0/db/models/contest"
@@ -24,7 +25,7 @@ func (p *Polar) handleConsumer(ctx context.Context, j *JudgeObj, conn *shared.En
 			p.releaseSubmission(j, currentSubmission)
 		}
 	}()
-	for conn.Scan() {
+	for conn.More() {
 		var req types.Request
 		if e := conn.Read(&req); e != nil {
 			continue
@@ -61,7 +62,7 @@ func (p *Polar) handleProducer(j *JudgeObj, conn *shared.EncodedConn, id uint32)
 	}
 	isDone := false
 	handler := p.messageHandler(id)
-	for conn.Scan() {
+	for conn.More() {
 		// submission is cancelled
 		if !p.IsPending(id) {
 			isDone = true
@@ -132,7 +133,7 @@ func (p *Polar) handleJudge(j types.Judge, conn *shared.EncodedConn) {
 func (p *Polar) handleConn(conn net.Conn) {
 	defer conn.Close()
 	c := shared.NewEncodedConn(conn)
-	if !c.Scan() {
+	if !c.More() {
 		return
 	}
 	var args types.RegisterArgs
@@ -155,11 +156,11 @@ func (p *Polar) handleConn(conn net.Conn) {
 		p.jm.RLock()
 		j := p.judges[args.JudgeID]
 		p.jm.RUnlock()
-		id, ok := args.Data.(uint32)
-		if !ok {
+		id, e := args.Data.(json.Number).Int64()
+		if e != nil {
 			return
 		}
-		p.handleProducer(j, c, id)
+		p.handleProducer(j, c, uint32(id))
 	}
 }
 
