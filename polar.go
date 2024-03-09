@@ -2,7 +2,7 @@ package polar
 
 import (
 	"context"
-	"github.com/ArcticOJ/blizzard/v0/db/models/contest"
+	"github.com/ArcticOJ/blizzard/v0/db/schema/contest"
 	"github.com/ArcticOJ/polar/v0/types"
 	csmap "github.com/mhmtszr/concurrent-swiss-map"
 	"sync"
@@ -15,6 +15,7 @@ type (
 		// to resolve submission ids to submissions
 		submissions *csmap.CsMap[uint32, types.Submission]
 		pending     *csmap.CsMap[uint32, []contest.CaseResult]
+		isBound     *csmap.CsMap[uint32, struct{}]
 		// maximum concurrent submissions
 		parallelism uint16
 		judges      map[string]*JudgeObj
@@ -43,6 +44,7 @@ func NewPolar(ctx context.Context, messageHandler func(id uint32) func(t types.R
 		queued:         csmap.Create[string, *queue](),
 		pending:        csmap.Create[uint32, []contest.CaseResult](),
 		submissions:    csmap.Create[uint32, types.Submission](),
+		isBound:        csmap.Create[uint32, struct{}](),
 		ctx:            ctx,
 		judges:         make(map[string]*JudgeObj),
 		messageHandler: messageHandler,
@@ -71,7 +73,7 @@ func (p *Polar) UpdateResult(id uint32, result contest.CaseResult) bool {
 	return true
 }
 
-func (p *Polar) GetResult(id uint32) []contest.CaseResult {
+func (p *Polar) GetResults(id uint32) []contest.CaseResult {
 	r, ok := p.pending.Load(id)
 	if !ok {
 		return nil

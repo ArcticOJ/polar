@@ -3,10 +3,9 @@ package polar
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"github.com/ArcticOJ/blizzard/v0/config"
-	"github.com/ArcticOJ/blizzard/v0/db/models/contest"
+	"github.com/ArcticOJ/blizzard/v0/db/schema/contest"
 	"github.com/ArcticOJ/blizzard/v0/logger"
 	"github.com/ArcticOJ/polar/v0/shared"
 	"github.com/ArcticOJ/polar/v0/types"
@@ -53,6 +52,9 @@ func (p *Polar) handleConsumer(ctx context.Context, j *JudgeObj, conn *shared.En
 }
 
 func (p *Polar) handleProducer(j *JudgeObj, conn *shared.EncodedConn, id uint32) {
+	if j == nil {
+		return
+	}
 	logger.Polar.Debug().Str("judge", j.Name).Stringer("addr", conn.Conn().RemoteAddr()).Uint32("submission", id).Msg("producer connected")
 	j.m.RLock()
 	_, isPending := j.submissions[id]
@@ -60,7 +62,19 @@ func (p *Polar) handleProducer(j *JudgeObj, conn *shared.EncodedConn, id uint32)
 	if !isPending {
 		return
 	}
-	isDone := false
+	isAlreadyBound := false
+	// add a safeguard to check whether current submission is already handled by another producer?
+	p.isBound.SetIf(id, func(_ struct{}, present bool) (struct{}, bool) {
+		isAlreadyBound = present
+		return struct{}{}, !present
+	})
+	if isAlreadyBound {
+		return
+	}
+	var (
+		isDone  bool
+		isAcked bool
+	)
 	handler := p.messageHandler(id)
 	for conn.More() {
 		// submission is cancelled
@@ -71,6 +85,20 @@ func (p *Polar) handleProducer(j *JudgeObj, conn *shared.EncodedConn, id uint32)
 		var args types.ReportArgs
 		if conn.Read(&args) != nil {
 			continue
+		}
+		// in case of re-judgement, isAcked will be set to true multiple times
+		if args.Type == types.ResultAck {
+			if isAcked {
+				if sub, ok := p.submissions.Load(id); ok {
+					/*
+						before re-judgement [res_1_1, res_1_2, res_1_3]
+						if we don't nullify case results before proceeding, the array will end up like this: [res_2_1, res_1_2, res_1_3], resulting in inconsistency and false results specifically when enabling SHORT_CIRCUIT.
+						(res_x_y denotes x-th judgement of test case y)
+					*/
+					p.pending.Store(sub.ID, make([]contest.CaseResult, sub.TestCount))
+				}
+			}
+			isAcked = true
 		}
 		if handler(args.Type, args.Data) {
 			isDone = true
@@ -131,6 +159,7 @@ func (p *Polar) handleJudge(j types.Judge, conn *shared.EncodedConn) {
 }
 
 func (p *Polar) handleConn(conn net.Conn) {
+	defer logger.Polar.Debug().Stringer("addr", conn.RemoteAddr()).Msg("client disconnected")
 	defer conn.Close()
 	c := shared.NewEncodedConn(conn)
 	if !c.More() {
@@ -156,8 +185,8 @@ func (p *Polar) handleConn(conn net.Conn) {
 		p.jm.RLock()
 		j := p.judges[args.JudgeID]
 		p.jm.RUnlock()
-		id, e := args.Data.(json.Number).Int64()
-		if e != nil {
+		id, ok := args.Data.(float64)
+		if !ok {
 			return
 		}
 		p.handleProducer(j, c, uint32(id))
@@ -165,7 +194,9 @@ func (p *Polar) handleConn(conn net.Conn) {
 }
 
 func (p *Polar) createServer() {
-	conf := net.ListenConfig{}
+	conf := net.ListenConfig{
+		KeepAlive: time.Second,
+	}
 	l, err := conf.Listen(p.ctx, "tcp", net.JoinHostPort(config.Config.Host, fmt.Sprint(config.Config.Polar.Port)))
 	logger.Panic(err, "failed to initialize polar")
 	logger.Polar.Info().Msgf("polar listening on port %d", config.Config.Polar.Port)

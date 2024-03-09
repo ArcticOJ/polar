@@ -13,14 +13,12 @@ type (
 	}
 )
 
-func NewEncodedConn(conn net.Conn) (c *EncodedConn) {
-	c = &EncodedConn{
+func NewEncodedConn(conn net.Conn) *EncodedConn {
+	return &EncodedConn{
 		conn:     conn,
 		_decoder: json.NewDecoder(conn),
 		_encoder: json.NewEncoder(conn),
 	}
-	c._decoder.UseNumber()
-	return
 }
 
 func (c *EncodedConn) Write(obj interface{}) (e error) {
