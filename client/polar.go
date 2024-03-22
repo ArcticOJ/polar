@@ -4,71 +4,89 @@ import (
 	"context"
 	"fmt"
 	"github.com/ArcticOJ/igloo/v0/config"
+	"github.com/ArcticOJ/igloo/v0/logger"
+	"github.com/ArcticOJ/polar/v0/pb"
 	"github.com/ArcticOJ/polar/v0/shared"
-	"github.com/ArcticOJ/polar/v0/types"
-	"github.com/hashicorp/yamux"
-	"io"
+	"go.elara.ws/drpc/muxconn"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
 	"net"
-	"time"
+	"storj.io/drpc/drpcmetadata"
 )
 
 type Polar struct {
-	host string
-	port uint16
-	// a single connection is probably enough to handle submissions
-	consumerConn    *shared.EncodedConn
-	consumerSession *yamux.Session
-	id              string
-	CloseChan       chan types.ConnType
-	ctx             context.Context
-	cancel          func()
+	id     string
+	ctx    context.Context
+	stream pb.DRPCPolar_ConnectAsJudgeClient
+	client pb.DRPCPolarClient
+	cancel func()
 }
 
-func New(_ctx context.Context, j types.Judge) (p *Polar, e error) {
-	var conn net.Conn
+func marshal[T proto.Message](msg T) *anypb.Any {
+	if res, e := anypb.New(msg); e == nil {
+		return res
+	}
+	return nil
+}
+
+func New(_ctx context.Context, j *pb.Judge) (p *Polar, e error) {
 	ctx, cancel := context.WithCancel(_ctx)
 	p = &Polar{
-		CloseChan: make(chan types.ConnType, 1),
-		ctx:       ctx,
-		cancel:    cancel,
-		host:      config.Config.Polar.Host,
-		port:      config.Config.Polar.Port,
+		ctx:    ctx,
+		cancel: cancel,
 	}
-	conn, e = net.DialTimeout("tcp", net.JoinHostPort(p.host, fmt.Sprint(p.port)), time.Second*5)
+	addr := net.JoinHostPort(config.Config.Polar.Host, fmt.Sprint(config.Config.Polar.Port))
+	var dialer net.Dialer
+	rconn, e := dialer.DialContext(ctx, "tcp", addr)
 	if e != nil {
 		return
 	}
-	p.consumerConn = shared.NewEncodedConn(conn)
-	p.id, e = p.registerJudge(j)
+	conn, e := muxconn.New(rconn)
 	if e != nil {
 		return
 	}
-	if p.id == "" {
-		e = types.ErrNoId
+	p.ctx = drpcmetadata.Add(ctx, shared.SecretHashMetadataKey, config.Config.Polar.SecretHash)
+	p.client = pb.NewDRPCPolarClient(conn)
+	p.stream, e = p.client.ConnectAsJudge(p.ctx)
+	if e != nil {
 		return
 	}
-	p.consumerSession, e = yamux.Client(conn, shared.MuxConfig())
+	p.stream.Send(&pb.Request{
+		Type: pb.Request_REGISTER,
+		Data: marshal(j),
+	})
+	resp, e := p.stream.Recv()
+	if e != nil {
+		return
+	}
+	p.id = resp.GetJudgeId()
+	logger.Logger.Debug().Str("judge_id", p.id).Msg("connected to polar")
+	if len(p.id) == 0 {
+		e = shared.ErrNoId
+	}
 	return
 }
 
 func (p *Polar) Close() {
-	p.consumerSession.Close()
+	p.stream.Close()
 	p.cancel()
 }
 
-func (p *Polar) registerJudge(j types.Judge) (id string, e error) {
-	e = p.consumerConn.Write(types.RegisterArgs{
-		Type:   types.ConnJudge,
-		Secret: config.Config.Polar.Secret,
-		Data:   j,
+func (p *Polar) Consume() *pb.Submission {
+	p.stream.Send(&pb.Request{
+		Type: pb.Request_CONSUME,
 	})
+	sub, e := p.stream.Recv()
 	if e != nil {
-		return
+		return nil
 	}
-	if !p.consumerConn.More() {
-		e = io.EOF
-		return
+	return sub.GetSubmission()
+}
+
+func (p *Polar) createContext(additionalData ...string) (ctx context.Context) {
+	ctx = p.ctx
+	for i := 0; i < len(additionalData); i += 2 {
+		ctx = drpcmetadata.Add(ctx, additionalData[i], additionalData[i+1])
 	}
-	e = p.consumerConn.Read(&id)
 	return
 }

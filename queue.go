@@ -2,25 +2,26 @@ package polar
 
 import (
 	"context"
-	"github.com/ArcticOJ/polar/v0/types"
+	"github.com/ArcticOJ/polar/v0/pb"
+	"github.com/ArcticOJ/polar/v0/shared"
 	"reflect"
 	"slices"
 )
 
-func (q *queue) pop() *types.Submission {
+func (q *queue) pop() *pb.Submission {
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
 	if len(q.slice) > 0 {
 		toReturn := q.slice[0]
 		q.slice = q.slice[1:]
-		return &toReturn
+		return toReturn
 	}
 	return nil
 }
 
-func (p *Polar) Populate(s []types.Submission) {
+func (p *Polar) Populate(s []*pb.Submission) {
 	for _, _s := range s {
-		p.submissions.Store(_s.ID, _s)
+		p.submissions.Store(_s.Id, _s)
 		p.queued.SetIfAbsent(_s.Runtime, &queue{
 			slice:    nil,
 			waitChan: make(chan string, 1),
@@ -30,14 +31,14 @@ func (p *Polar) Populate(s []types.Submission) {
 	}
 }
 
-func (p *Polar) Push(s types.Submission, force bool) error {
+func (p *Polar) Push(s *pb.Submission, forced bool) error {
 	q, ok := p.queued.Load(s.Runtime)
 	// count of consumers with this runtime waiting
 	cnt := q.count.Load()
-	if !ok && !force {
-		return types.ErrNoRuntime
+	if !ok && !forced {
+		return shared.ErrNoRuntime
 	}
-	p.submissions.Store(s.ID, s)
+	p.submissions.Store(s.Id, s)
 	q.slice = append(q.slice, s)
 	if cnt > 0 {
 		// notify ONE consumer waiting on this channel
@@ -49,13 +50,13 @@ func (p *Polar) Push(s types.Submission, force bool) error {
 	return nil
 }
 
-func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submission {
-	var cases = []reflect.SelectCase{{
+func (p *Polar) Pop(ctx context.Context, runtimes []*pb.Judge_Runtime) *pb.Submission {
+	cases := []reflect.SelectCase{{
 		Dir:  reflect.SelectRecv,
 		Chan: reflect.ValueOf(ctx.Done()),
 	}}
 	for _, rt := range runtimes {
-		if q, ok := p.queued.Load(rt.ID); ok {
+		if q, ok := p.queued.Load(rt.Id); ok {
 			if sub := q.pop(); sub != nil {
 				return sub
 			}
@@ -81,12 +82,12 @@ func (p *Polar) Pop(ctx context.Context, runtimes []types.Runtime) *types.Submis
 	}
 }
 
-func (p *Polar) GetSubmission(id uint32) *types.Submission {
+func (p *Polar) GetSubmission(id uint32) *pb.Submission {
 	sub, ok := p.submissions.Load(id)
 	if !ok {
 		return nil
 	}
-	return &sub
+	return sub
 }
 
 func (p *Polar) Cancel(id uint32, userId string) bool {
@@ -94,7 +95,7 @@ func (p *Polar) Cancel(id uint32, userId string) bool {
 	if !ok {
 		return false
 	}
-	if sub.AuthorID != userId {
+	if sub.AuthorId != userId {
 		return false
 	}
 	p.submissions.Delete(id)
@@ -108,8 +109,8 @@ func (p *Polar) Cancel(id uint32, userId string) bool {
 	}
 	q.mutex.Lock()
 	defer q.mutex.Unlock()
-	q.slice = slices.DeleteFunc(q.slice, func(s types.Submission) bool {
-		return s.ID == id
+	q.slice = slices.DeleteFunc(q.slice, func(s *pb.Submission) bool {
+		return s.Id == id
 	})
 	return true
 }

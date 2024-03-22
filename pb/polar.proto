@@ -1,0 +1,110 @@
+syntax = "proto3";
+
+option go_package = "github.com/ArcticOJ/polar/v0/pb";
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/wrappers.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+
+package polar;
+
+enum CaseVerdict {
+  ACCEPTED = 0;
+  WRONG_ANSWER = 1;
+  INTERNAL_ERROR = 2;
+  TIME_LIMIT_EXCEEDED = 3;
+  MEMORY_LIMIT_EXCEEDED = 4;
+  OUTPUT_LIMIT_EXCEEDED = 5;
+  RUNTIME_ERROR = 6;
+}
+
+enum FinalVerdict {
+  NORMAL = 0;
+  SHORT_CIRCUIT = 1;
+  REJECTED = 2;
+  CANCELLED = 3;
+  COMPILATION_ERROR = 4;
+  INITIALIZATION_ERROR = 5;
+}
+
+message CaseResult {
+  uint32 caseId = 1;
+  float executionTime = 2;
+  uint32 memory = 3;
+  string message = 4;
+  CaseVerdict verdict = 5;
+}
+message FinalResult {
+  string compilerOutput = 1;
+  CaseVerdict lastNonAcVerdict = 2;
+  FinalVerdict verdict = 3;
+}
+
+message Result {
+  oneof data {
+    CaseResult case = 1;
+    FinalResult final = 2;
+    google.protobuf.Empty none = 3;
+  }
+}
+
+message Judge {
+  message Runtime {
+    string id = 1;
+    string compiler = 2;
+    string arguments = 3;
+    string version = 4;
+  }
+  string name = 1;
+  string version = 2;
+  uint64 memory = 3;
+  string os = 4;
+  uint32 parallelism = 5;
+  google.protobuf.Timestamp bootedSince = 6;
+  repeated Runtime runtimes = 7;
+}
+
+message Submission {
+  message Constraints {
+    enum Flag {
+      NONE = 0;
+      INTERACTIVE = 1;
+      SHORT_CIRCUIT = 2;
+    }
+    uint32 flags = 1;
+    float timeLimit = 2;
+    uint32 memoryLimit = 3;
+    uint32 outputLimit = 4;
+  }
+  uint32 id = 1;
+  string sourcePath = 2;
+  string runtime = 3;
+  string problemId = 4;
+  uint32 testCount = 5;
+  Constraints constraints = 6;
+  string authorId = 7;
+}
+
+message Request {
+  enum Type {
+    REGISTER = 0;
+    CONSUME = 1;
+    UPDATE_SYSTEM_LOAD = 2;
+  }
+  Type type = 1;
+  google.protobuf.Any data = 2;
+}
+
+message Response {
+  oneof data {
+    string judgeId = 1;
+    Submission submission = 2;
+    google.protobuf.Empty _ = 3;
+  }
+}
+
+service Polar {
+  rpc ConnectAsJudge(stream Request) returns (stream Response);
+  rpc ConnectAsProducer(stream Result) returns (google.protobuf.BoolValue);
+}
