@@ -2,6 +2,7 @@ package polar
 
 import (
 	"context"
+	"crypto/md5"
 	"encoding/hex"
 	"fmt"
 	"github.com/ArcticOJ/blizzard/v0/config"
@@ -46,29 +47,33 @@ func (p *Polar) serveRPC() {
 func (p *Polar) ConnectAsJudge(stream pb.DRPCPolar_ConnectAsJudgeStream) error {
 	request, e := stream.Recv()
 	if e != nil || request.Type != pb.Request_REGISTER {
-		return stream.Close()
+		return shared.ErrInvalidCommand
 	}
 	j := &pb.Judge{}
 	if request.Data.UnmarshalTo(j) != nil {
-		return stream.Close()
+		return shared.ErrReqDeserialize
 	}
-	defer logger.Polar.Debug().Msg("client disconnected")
-	id := hex.EncodeToString([]byte(fmt.Sprintf("%s-%d", j.Name, time.Now().UnixMilli())))
+	id := md5.Sum([]byte(fmt.Sprintf("%s-%d", j.Name, time.Now().UnixMilli())))
+	hashedId := hex.EncodeToString(id[:])
 	obj := &JudgeObj{
 		Judge:       j,
 		submissions: make(map[uint32]struct{}),
 	}
 	logger.Polar.Debug().
 		Str("name", j.Name).
-		Str("id", id).
+		Str("id", hashedId).
 		Msg("judge connected")
 	p.jm.Lock()
-	p.judges[id] = obj
+	p.judges[hashedId] = obj
 	p.jm.Unlock()
+	defer logger.Polar.Debug().
+		Str("name", j.Name).
+		Str("id", hashedId).
+		Msg("client disconnected")
 	p.RegisterRuntimes(obj.Runtimes)
-	defer p.destroy(id)
+	defer p.destroy(hashedId)
 	if e = stream.Send(&pb.Response{
-		Data: &pb.Response_JudgeId{JudgeId: id},
+		Data: &pb.Response_JudgeId{JudgeId: hashedId},
 	}); e != nil {
 		return e
 	}
@@ -129,7 +134,7 @@ func (p *Polar) ConnectAsProducer(stream pb.DRPCPolar_ConnectAsProducerStream) e
 	j := p.judges[judgeId]
 	p.jm.RUnlock()
 	if j == nil {
-		return stream.Close()
+		return shared.ErrReqDeserialize
 	}
 	logger.Polar.Debug().Str("judge", j.Name).Uint32("submission", id).Msg("producer connected")
 	isAlreadyBound := false

@@ -45,9 +45,14 @@ func New(_ctx context.Context, j *pb.Judge) (p *Polar, e error) {
 	if e != nil {
 		return
 	}
-	p.ctx = drpcmetadata.Add(ctx, shared.SecretHashMetadataKey, config.Config.Polar.SecretHash)
 	p.client = pb.NewDRPCPolarClient(conn)
-	p.stream, e = p.client.ConnectAsJudge(p.ctx)
+	p.stream, e = p.client.ConnectAsJudge(
+		drpcmetadata.Add(
+			ctx,
+			shared.SecretHashMetadataKey,
+			config.Config.Polar.SecretHash,
+		),
+	)
 	if e != nil {
 		return
 	}
@@ -72,21 +77,12 @@ func (p *Polar) Close() {
 	p.cancel()
 }
 
-func (p *Polar) Consume() *pb.Submission {
-	p.stream.Send(&pb.Request{
+func (p *Polar) Consume() (*pb.Submission, error) {
+	if e := p.stream.Send(&pb.Request{
 		Type: pb.Request_CONSUME,
-	})
+	}); e != nil {
+		return nil, e
+	}
 	sub, e := p.stream.Recv()
-	if e != nil {
-		return nil
-	}
-	return sub.GetSubmission()
-}
-
-func (p *Polar) createContext(additionalData ...string) (ctx context.Context) {
-	ctx = p.ctx
-	for i := 0; i < len(additionalData); i += 2 {
-		ctx = drpcmetadata.Add(ctx, additionalData[i], additionalData[i+1])
-	}
-	return
+	return sub.GetSubmission(), e
 }

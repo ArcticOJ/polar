@@ -47,8 +47,8 @@ func (md loggingMiddleware) HandleRPC(_stream drpc.Stream, rpc string) error {
 	}
 	err := md.next.HandleRPC(s, rpc)
 	logger.Polar.Debug().
-		Dur("duration", time.Now().UTC().Sub(start)).
-		Time("start", start).
+		Stringer("duration", time.Now().UTC().Sub(start)).
+		Stringer("start", start).
 		Err(err).
 		Fields(fields).
 		Msg("rpc handled")
@@ -62,10 +62,9 @@ func getFields(stream drpc.Stream, rpc string) (fields map[string]string) {
 		fields = make(map[string]string)
 	}
 	segments := strings.Split(rpc, "/")
-	if len(segments) == 3 {
-		fields["rpc.system"] = segments[0]
-		fields["rpc.service"] = segments[1]
-		fields["rpc.method"] = segments[2]
+	if len(segments) >= 2 {
+		fields["rpc.service"] = segments[0]
+		fields["rpc.method"] = segments[1]
 	}
 	return fields
 }
