@@ -11,17 +11,20 @@ import (
 
 type (
 	Polar struct {
-		queued *csmap.CsMap[string, *queue]
-		// to resolve submission ids to submissions
+		queued      *csmap.CsMap[string, *queue]
 		submissions *csmap.CsMap[uint32, *pb.Submission]
 		pending     *csmap.CsMap[uint32, []contest.CaseResult]
 		isBound     *csmap.CsMap[uint32, struct{}]
-		// maximum concurrent submissions
+
+		// Maximum allowed concurrent submissions.
 		parallelism uint16
 		judges      map[string]*JudgeObj
-		// mutex for reading/writing to judges
-		jm             sync.RWMutex
-		ctx            context.Context
+
+		// Lock for reading/writing to judges field above.
+		jm  sync.RWMutex
+		ctx context.Context
+
+		// A function which returns another stateful function which handles results for an individual submission when called with a submission ID.
 		messageHandler func(uint32) func(result *pb.Result) bool
 	}
 	queue struct {
@@ -32,8 +35,9 @@ type (
 	}
 	JudgeObj struct {
 		*pb.Judge
-		// internal properties
-		// current submissions
+
+		// Internal properties below.
+
 		submissions map[uint32]struct{}
 		m           sync.RWMutex
 	}
@@ -68,7 +72,7 @@ func (p *Polar) UpdateResult(id uint32, result contest.CaseResult) bool {
 	if !ok {
 		return false
 	}
-	res[result.ID-1] = result
+	res = append(res, result)
 	p.pending.Store(id, res)
 	return true
 }
@@ -107,6 +111,8 @@ func (p *Polar) GetJudges() map[string]*JudgeObj {
 	return p.judges
 }
 
+// TODO: remove `isPending` check, force callers to choose whether to requeue this submission or simply ignore it
+
 func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 	p.jm.RLock()
 	_, isPending := j.submissions[id]
@@ -117,7 +123,6 @@ func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 		p.jm.Unlock()
 		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
 			p.pending.Delete(id)
-			// requeue submission
 			p.Push(sub, true)
 		}
 		return

@@ -14,6 +14,8 @@ type authMiddleware struct {
 	next drpc.Handler
 }
 
+// TODO: refactor this cringe and trivial authentication mechanism as it literally does nothing lol.
+
 func AuthMiddleware(secret string) Middleware {
 	hash := md5.Sum([]byte(secret))
 	return func(next drpc.Handler) drpc.Handler {

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/ArcticOJ/blizzard/v0/config"
-	"github.com/ArcticOJ/blizzard/v0/db/schema/contest"
 	"github.com/ArcticOJ/blizzard/v0/logger"
 	"github.com/ArcticOJ/polar/v0/middlewares"
 	"github.com/ArcticOJ/polar/v0/pb"
@@ -89,16 +88,16 @@ func (p *Polar) ConnectAsJudge(stream pb.DRPCPolar_ConnectAsJudgeStream) error {
 			if sub == nil {
 				break
 			}
-			// mark this submission as pending
-			p.pending.Store(sub.Id, make([]contest.CaseResult, sub.TestCount))
-			// bind submission to this judge
+
+			p.pending.Store(sub.Id, nil)
+
 			obj.m.Lock()
 			obj.submissions[sub.Id] = struct{}{}
 			obj.m.Unlock()
 			if stream.Send(&pb.Response{
 				Data: &pb.Response_Submission{Submission: sub},
 			}) != nil {
-				// this submission cannot be consumed, so better requeue it
+				// This submission cannot be consumed, so better requeue it.
 				p.releaseSubmission(obj, sub.Id)
 				break
 			}
@@ -139,7 +138,7 @@ func (p *Polar) ConnectAsProducer(stream pb.DRPCPolar_ConnectAsProducerStream) e
 	logger.Polar.Debug().Str("judge", j.Name).Uint32("submission", id).Msg("producer connected")
 	isAlreadyBound := false
 	j.m.RLock()
-	// add a safeguard to check whether current submission is already handled by another producer?
+	// Add a safeguard to check whether current submission is already handled by another producer.
 	p.isBound.SetIf(id, func(_ struct{}, present bool) (struct{}, bool) {
 		isAlreadyBound = present
 		return struct{}{}, !present
@@ -160,21 +159,15 @@ func (p *Polar) ConnectAsProducer(stream pb.DRPCPolar_ConnectAsProducerStream) e
 		if e != nil {
 			break
 		}
-		// submission is cancelled
+		// Submission is "probably" cancelled?
 		if !p.IsPending(id) {
 			isDone = true
 			break
 		}
-		// in case of re-judgement, isAcked will be set to true multiple times
 		if _, isAck := result.Data.(*pb.Result_None); isAck {
 			if isAcked {
 				if sub, ok := p.submissions.Load(id); ok {
-					/*
-						before re-judgement [res_1_1, res_1_2, res_1_3]
-						if we don't nullify case results before proceeding, the array will end up like this: [res_2_1, res_1_2, res_1_3], resulting in inconsistency and false results specifically when enabling SHORT_CIRCUIT.
-						(res_x_y denotes x-th judgement of test case y)
-					*/
-					p.pending.Store(sub.Id, make([]contest.CaseResult, sub.TestCount))
+					p.pending.Store(sub.Id, nil)
 				}
 			}
 			isAcked = true
@@ -189,11 +182,10 @@ func (p *Polar) ConnectAsProducer(stream pb.DRPCPolar_ConnectAsProducerStream) e
 	j.m.Lock()
 	delete(j.submissions, id)
 	j.m.Unlock()
-	// if judge dies or current submission is rejected, requeue current submission
+	// If judge crashes or current submission is rejected, requeue it outrightly.
 	if !isDone {
 		if sub, ok := p.submissions.Load(id); ok {
 			p.pending.Delete(id)
-			// requeue submission
 			p.Push(sub, true)
 		}
 	}

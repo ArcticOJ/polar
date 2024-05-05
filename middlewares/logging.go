@@ -1,5 +1,3 @@
-// from bryk.io/net/drpc/middleware/server/logging.go
-
 package middlewares
 
 import (

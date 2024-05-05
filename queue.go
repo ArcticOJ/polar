@@ -41,7 +41,7 @@ func (p *Polar) Push(s *pb.Submission, forced bool) error {
 	p.submissions.Store(s.Id, s)
 	q.slice = append(q.slice, s)
 	if cnt > 0 {
-		// notify ONE consumer waiting on this channel
+		// Notify a "random" judge waiting for a submission with this runtime ID.
 		select {
 		case q.waitChan <- s.Runtime:
 		default:
@@ -68,7 +68,7 @@ func (p *Polar) Pop(ctx context.Context, runtimes []*pb.Judge_Runtime) *pb.Submi
 	}
 	for {
 		chosen, val, received := reflect.Select(cases)
-		// the first case is ctx.Done(), so if it's chosen, return
+		// The first case is ctx.Done(), so return if it's chosen.
 		if !received || chosen == 0 {
 			return nil
 		}
@@ -99,7 +99,7 @@ func (p *Polar) Cancel(id uint32, userId string) bool {
 		return false
 	}
 	p.submissions.Delete(id)
-	// If this submission was previously marked as pending, remove it from pending, judges will automatically cancel it when failing to report result
+	// If this submission was previously marked as pending, remove it from pending submissions.
 	if p.pending.Delete(id) {
 		return false
 	}
