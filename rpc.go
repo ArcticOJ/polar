@@ -2,77 +2,69 @@ package polar
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
-	"fmt"
-	"github.com/ArcticOJ/blizzard/v0/config"
-	"github.com/ArcticOJ/blizzard/v0/logger"
-	"github.com/ArcticOJ/polar/v0/middlewares"
-	"github.com/ArcticOJ/polar/v0/pb"
-	"github.com/ArcticOJ/polar/v0/shared"
-	"go.elara.ws/drpc/muxserver"
-	"net"
+	"github.com/rs/zerolog/log"
+	"necron.dev/pkg/ArcticOJ/polar/common"
+	"necron.dev/pkg/ArcticOJ/polar/middlewares"
+	"necron.dev/pkg/ArcticOJ/polar/pb"
+	"necron.dev/pkg/ArcticOJ/utils/numeric"
 	"storj.io/drpc"
 	"storj.io/drpc/drpcmetadata"
-	"storj.io/drpc/drpcmux"
-	"strconv"
-	"time"
 )
 
-func wrapMiddlewares(base drpc.Handler, m ...middlewares.Middleware) drpc.Handler {
-	for _, _m := range m {
-		base = _m(base)
+func wrapMiddlewares(handler drpc.Handler, m ...middlewares.Middleware) drpc.Handler {
+	for _, w := range m {
+		handler = w(handler)
 	}
-	return base
-}
-
-func (p *Polar) serveRPC() {
-	mux := drpcmux.New()
-	logger.Panic(pb.DRPCRegisterPolar(mux, p), "error registering polar service")
-	addr := net.JoinHostPort(config.Config.Host, fmt.Sprint(config.Config.Polar.Port))
-	var lc net.ListenConfig
-	l, err := lc.Listen(p.ctx, "tcp", addr)
-	defer l.Close()
-	logger.Panic(err, "failed to listen on %s", addr)
-	s := muxserver.New(wrapMiddlewares(mux,
-		middlewares.AuthMiddleware(config.Config.Polar.Secret),
-		middlewares.PanicRecover(),
-		middlewares.Logging(),
-	))
-	logger.Polar.Info().Msgf("polar listening on %s", addr)
-	logger.Panic(s.Serve(p.ctx, l), "error serving polar server")
+	return handler
 }
 
 func (p *Polar) ConnectAsJudge(stream pb.DRPCPolar_ConnectAsJudgeStream) error {
+	// Send handshake data with a regenerated ID and runtime definitions and wait for report of available runtimes from judge.
+	judgeId := stream.Context().Value("id").(uint32)
+	judgeName := stream.Context().Value("name").(string)
+	if e := stream.Send(&pb.Response{
+		Data: &pb.Response_HandshakeData{
+			HandshakeData: &pb.HandshakeData{
+				Runtimes: p.runtimes,
+			},
+		},
+	}); e != nil {
+		return e
+	}
 	request, e := stream.Recv()
 	if e != nil || request.Type != pb.Request_REGISTER {
-		return shared.ErrInvalidCommand
+		return common.ErrInvalidCommand
 	}
 	j := &pb.Judge{}
 	if request.Data.UnmarshalTo(j) != nil {
-		return shared.ErrReqDeserialize
+		return common.ErrReqDeserialize
 	}
-	id := md5.Sum([]byte(fmt.Sprintf("%s-%d", j.Name, time.Now().UnixMilli())))
-	hashedId := hex.EncodeToString(id[:])
+	if len(j.Runtimes) == 0 {
+		return common.ErrJudgeRejected
+	}
+	if e = p.onJudgeConnected(judgeId); e != nil {
+		return e
+	}
 	obj := &JudgeObj{
 		Judge:       j,
 		submissions: make(map[uint32]struct{}),
 	}
-	logger.Polar.Debug().
-		Str("name", j.Name).
-		Str("id", hashedId).
+	log.Debug().
+		Uint32("id", judgeId).
+		Str("name", judgeName).
 		Msg("judge connected")
 	p.jm.Lock()
-	p.judges[hashedId] = obj
+	p.judges[judgeId] = obj
 	p.jm.Unlock()
-	defer logger.Polar.Debug().
-		Str("name", j.Name).
-		Str("id", hashedId).
-		Msg("client disconnected")
-	p.RegisterRuntimes(obj.Runtimes)
-	defer p.destroy(hashedId)
+	defer log.Debug().
+		Uint32("id", judgeId).
+		Str("name", judgeName).
+		Msg("judge disconnected")
+	p.registerRuntimes(obj.Runtimes)
+	defer p.destroy(judgeId)
+	// Send an OK message indicating that judge is now usable.
 	if e = stream.Send(&pb.Response{
-		Data: &pb.Response_JudgeId{JudgeId: hashedId},
+		Data: nil,
 	}); e != nil {
 		return e
 	}
@@ -84,12 +76,12 @@ func (p *Polar) ConnectAsJudge(stream pb.DRPCPolar_ConnectAsJudgeStream) error {
 		}
 		switch request.Type {
 		case pb.Request_CONSUME:
-			sub := p.Pop(ctx, j.Runtimes)
+			sub := p.pop(ctx, j.Runtimes)
 			if sub == nil {
 				break
 			}
 
-			p.pending.Store(sub.Id, nil)
+			p.pending.Set(sub.Id, nil)
 
 			obj.m.Lock()
 			obj.submissions[sub.Id] = struct{}{}
@@ -106,87 +98,78 @@ func (p *Polar) ConnectAsJudge(stream pb.DRPCPolar_ConnectAsJudgeStream) error {
 	return nil
 }
 
-func parseProducerArgs(ctx context.Context) (id string, subId uint32, ok bool) {
+func parseContext(ctx context.Context) (judgeId uint32, subId uint32) {
+	judgeId = ctx.Value("id").(uint32)
 	rawM, ok := drpcmetadata.Get(ctx)
 	if !ok {
 		return
 	}
-	id, ok = rawM[shared.JudgeIdMetadataKey]
-	if !ok {
-		return
-	}
-	_subId, ok := rawM[shared.SubmissionIdMetadataKey]
-	if !ok {
-		return
-	}
-	sid, e := strconv.ParseUint(_subId, 10, 32)
-	subId, ok = uint32(sid), e == nil
+	subId = numeric.Parse[uint32](rawM[common.SubmissionIdMetadataKey])
 	return
 }
 
 func (p *Polar) ConnectAsProducer(stream pb.DRPCPolar_ConnectAsProducerStream) error {
-	judgeId, id, parseOk := parseProducerArgs(stream.Context())
-	if !parseOk {
-		return shared.ErrInvalidMetadata
-	}
+	judgeId, submissionId := parseContext(stream.Context())
 	p.jm.RLock()
 	j := p.judges[judgeId]
 	p.jm.RUnlock()
 	if j == nil {
-		return shared.ErrReqDeserialize
+		return common.ErrReqDeserialize
 	}
-	logger.Polar.Debug().Str("judge", j.Name).Uint32("submission", id).Msg("producer connected")
-	isAlreadyBound := false
+	log.Debug().
+		Uint32("judge", judgeId).
+		Uint32("submission", submissionId).
+		Msg("producer connected")
 	j.m.RLock()
 	// Add a safeguard to check whether current submission is already handled by another producer.
-	p.isBound.SetIf(id, func(_ struct{}, present bool) (struct{}, bool) {
-		isAlreadyBound = present
-		return struct{}{}, !present
-	})
-	_, isPending := j.submissions[id]
+	isAlreadyBound := p.isBound.Has(submissionId)
+	if !isAlreadyBound {
+		p.isBound.Set(submissionId, struct{}{})
+	}
+	_, isPending := j.submissions[submissionId]
 	j.m.RUnlock()
 	if isAlreadyBound || !isPending {
-		return shared.ErrAlreadyJudged
+		return common.ErrAlreadyJudged
 	}
 	var (
 		e       error
 		isDone  bool
 		isAcked bool
 	)
-	handler := p.messageHandler(id)
+	handler := p.handleResult(context.WithValue(stream.Context(), "id", submissionId))
 	for {
 		result, e := stream.Recv()
 		if e != nil {
 			break
 		}
 		// Submission is "probably" cancelled?
-		if !p.IsPending(id) {
+		if !p.IsPending(submissionId) {
 			isDone = true
 			break
 		}
 		if _, isAck := result.Data.(*pb.Result_None); isAck {
 			if isAcked {
-				if sub, ok := p.submissions.Load(id); ok {
-					p.pending.Store(sub.Id, nil)
+				if sub, ok := p.submissions.Get(submissionId); ok {
+					p.pending.Set(sub.Id, nil)
 				}
 			}
 			isAcked = true
 		}
 		if handler(result) {
 			isDone = true
-			p.pending.Delete(id)
-			p.submissions.Delete(id)
+			p.pending.Remove(submissionId)
+			p.submissions.Remove(submissionId)
 			break
 		}
 	}
 	j.m.Lock()
-	delete(j.submissions, id)
+	delete(j.submissions, submissionId)
 	j.m.Unlock()
 	// If judge crashes or current submission is rejected, requeue it outrightly.
 	if !isDone {
-		if sub, ok := p.submissions.Load(id); ok {
-			p.pending.Delete(id)
-			p.Push(sub, true)
+		if sub, ok := p.submissions.Get(submissionId); ok {
+			p.pending.Remove(submissionId)
+			p.push(sub, true)
 		}
 	}
 	return e

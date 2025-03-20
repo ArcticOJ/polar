@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-option go_package = "github.com/ArcticOJ/polar/v0/pb";
+option go_package = "necron.dev/pkg/ArcticOJ/polar/pb";
 
 import "google/protobuf/empty.proto";
 import "google/protobuf/wrappers.proto";
@@ -29,11 +29,12 @@ enum FinalVerdict {
 
 message CaseResult {
   uint32 caseId = 1;
-  float executionTime = 2;
+  uint32 executionTime = 2;
   uint32 memory = 3;
-  string message = 4;
+  string feedback = 4;
   CaseVerdict verdict = 5;
 }
+
 message FinalResult {
   string compilerOutput = 1;
   CaseVerdict lastNonAcVerdict = 2;
@@ -51,17 +52,20 @@ message Result {
 message Judge {
   message Runtime {
     string id = 1;
-    string compiler = 2;
-    string arguments = 3;
-    string version = 4;
+    string version = 2;
   }
-  string name = 1;
   string version = 2;
-  uint64 memory = 3;
-  string os = 4;
-  uint32 parallelism = 5;
-  int64 bootedSince = 6;
-  repeated Runtime runtimes = 7;
+  uint32 parallelism = 3;
+  repeated Runtime runtimes = 4;
+}
+
+message RuntimeDefinition {
+  string id = 1;
+  string compileCmd = 2;
+  string compileArgs = 3;
+  string execCmd = 4;
+  string versionCmd = 5;
+  string extension = 6;
 }
 
 message Submission {
@@ -77,12 +81,12 @@ message Submission {
     uint32 outputLimit = 4;
   }
   uint32 id = 1;
-  string sourcePath = 2;
-  string runtime = 3;
-  string problemId = 4;
+  string sourceCode = 2;
+  string runtimeId = 3;
+  string problemCode = 4;
   uint32 testCount = 5;
   Constraints constraints = 6;
-  string authorId = 7;
+  uint32 authorId = 7;
 }
 
 message Request {
@@ -95,9 +99,13 @@ message Request {
   google.protobuf.Any data = 2;
 }
 
+message HandshakeData {
+  repeated RuntimeDefinition runtimes = 1;
+}
+
 message Response {
   oneof data {
-    string judgeId = 1;
+    HandshakeData handshakeData = 1;
     Submission submission = 2;
     google.protobuf.Empty _ = 3;
   }

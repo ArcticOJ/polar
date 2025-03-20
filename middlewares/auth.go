@@ -1,27 +1,27 @@
 package middlewares
 
 import (
-	"crypto/md5"
-	"encoding/hex"
+	"context"
 	"errors"
-	"github.com/ArcticOJ/polar/v0/shared"
+	"fmt"
+	"necron.dev/pkg/ArcticOJ/polar/common"
 	"storj.io/drpc"
 	"storj.io/drpc/drpcmetadata"
 )
 
-type authMiddleware struct {
-	hash string
-	next drpc.Handler
-}
+type (
+	authMiddleware struct {
+		queryFn queryFunc
+		next    drpc.Handler
+	}
+	queryFunc func(context.Context, string) (uint32, string, error)
+)
 
-// TODO: refactor this cringe and trivial authentication mechanism as it literally does nothing lol.
-
-func AuthMiddleware(secret string) Middleware {
-	hash := md5.Sum([]byte(secret))
+func AuthMiddleware(queryFn queryFunc) Middleware {
 	return func(next drpc.Handler) drpc.Handler {
 		return authMiddleware{
-			hash: hex.EncodeToString(hash[:]),
-			next: next,
+			queryFn: queryFn,
+			next:    next,
 		}
 	}
 }
@@ -31,12 +31,16 @@ func (a authMiddleware) HandleRPC(stream drpc.Stream, rpc string) error {
 	if !ok {
 		return errors.New("invalid metadata")
 	}
-	hash, ok := data[shared.SecretHashMetadataKey]
+	secret, ok := data[common.SecretMetadataKey]
 	if !ok {
-		return errors.New("secret hash not found")
+		return errors.New("secret not found")
 	}
-	if hash != a.hash {
-		return errors.New("invalid secret hash")
+	if judgeId, judgeName, e := a.queryFn(stream.Context(), secret); e == nil {
+		fmt.Println(judgeId)
+		return a.next.HandleRPC(streamWithValues(stream,
+			"id", judgeId,
+			"name", judgeName,
+		), rpc)
 	}
-	return a.next.HandleRPC(stream, rpc)
+	return errors.New("invalid secret")
 }

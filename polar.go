@@ -1,31 +1,46 @@
 package polar
 
 import (
+	"container/list"
 	"context"
-	"github.com/ArcticOJ/blizzard/v0/db/schema/contest"
-	"github.com/ArcticOJ/polar/v0/pb"
-	csmap "github.com/mhmtszr/concurrent-swiss-map"
+	"encoding/json"
+	"entgo.io/ent/dialect/sql"
+	"errors"
+	"github.com/danielgtaylor/huma/v2/sse"
+	"github.com/orcaman/concurrent-map/v2"
+	"necron.dev/pkg/ArcticOJ/bridge"
+	"necron.dev/pkg/ArcticOJ/config"
+	"necron.dev/pkg/ArcticOJ/db"
+	"necron.dev/pkg/ArcticOJ/db/problem"
+	"necron.dev/pkg/ArcticOJ/db/submission"
+	"necron.dev/pkg/ArcticOJ/di"
+	"necron.dev/pkg/ArcticOJ/logger"
+	"necron.dev/pkg/ArcticOJ/polar/pb"
+	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type (
 	Polar struct {
-		queued      *csmap.CsMap[string, *queue]
-		submissions *csmap.CsMap[uint32, *pb.Submission]
-		pending     *csmap.CsMap[uint32, []contest.CaseResult]
-		isBound     *csmap.CsMap[uint32, struct{}]
+		m           sync.RWMutex
+		subscribers cmap.ConcurrentMap[uint32, *submissionSubscribers]
+
+		conf        config.BridgeConfig
+		queued      cmap.ConcurrentMap[string, *queue]
+		submissions cmap.ConcurrentMap[uint32, *pb.Submission]
+		pending     cmap.ConcurrentMap[uint32, []db.CaseResult]
+		isBound     cmap.ConcurrentMap[uint32, struct{}]
 
 		// Maximum allowed concurrent submissions.
 		parallelism uint16
-		judges      map[string]*JudgeObj
+		runtimes    []*pb.RuntimeDefinition
+		judges      map[uint32]*JudgeObj
 
 		// Lock for reading/writing to judges field above.
 		jm  sync.RWMutex
 		ctx context.Context
-
-		// A function which returns another stateful function which handles results for an individual submission when called with a submission ID.
-		messageHandler func(uint32) func(result *pb.Result) bool
 	}
 	queue struct {
 		count    atomic.Uint32
@@ -41,74 +56,25 @@ type (
 		submissions map[uint32]struct{}
 		m           sync.RWMutex
 	}
+	submissionSubscribers struct {
+		m sync.RWMutex
+		l *list.List
+	}
 )
 
-func NewPolar(ctx context.Context, messageHandler func(id uint32) func(result *pb.Result) bool) (p *Polar) {
-	p = &Polar{
-		queued:         csmap.Create[string, *queue](),
-		pending:        csmap.Create[uint32, []contest.CaseResult](),
-		submissions:    csmap.Create[uint32, *pb.Submission](),
-		isBound:        csmap.Create[uint32, struct{}](),
-		ctx:            ctx,
-		judges:         make(map[string]*JudgeObj),
-		messageHandler: messageHandler,
-	}
-	return
+func shardingFn(k uint32) uint32 {
+	return k
 }
 
-func (p *Polar) RegisterRuntimes(runtimes []*pb.Judge_Runtime) {
+func (p *Polar) registerRuntimes(runtimes []*pb.Judge_Runtime) {
 	for _, rt := range runtimes {
 		// register a runtime if not present or update it
 		p.queued.SetIfAbsent(rt.Id, &queue{
 			waitChan: make(chan string, 1),
 		})
-		q, _ := p.queued.Load(rt.Id)
+		q, _ := p.queued.Get(rt.Id)
 		q.count.Add(1)
 	}
-}
-
-func (p *Polar) UpdateResult(id uint32, result contest.CaseResult) bool {
-	res, ok := p.pending.Load(id)
-	if !ok {
-		return false
-	}
-	res = append(res, result)
-	p.pending.Store(id, res)
-	return true
-}
-
-func (p *Polar) GetResults(id uint32) []contest.CaseResult {
-	r, ok := p.pending.Load(id)
-	if !ok {
-		return nil
-	}
-	return r
-}
-
-func (p *Polar) IsPending(id uint32) bool {
-	return p.pending.Has(id)
-}
-
-func (p *Polar) RuntimeAvailable(runtime string) bool {
-	q, ok := p.queued.Load(runtime)
-	if !ok {
-		return false
-	}
-	return q.count.Load() > 0
-}
-
-func (p *Polar) Reject(j *JudgeObj, id uint32) {
-	p.releaseSubmission(j, id)
-}
-
-func (p *Polar) StartServer() {
-	go p.serveRPC()
-}
-
-func (p *Polar) GetJudges() map[string]*JudgeObj {
-	p.jm.RLock()
-	defer p.jm.RUnlock()
-	return p.judges
 }
 
 // TODO: remove `isPending` check, force callers to choose whether to requeue this submission or simply ignore it
@@ -121,15 +87,15 @@ func (p *Polar) releaseSubmission(j *JudgeObj, id uint32) {
 		p.jm.Lock()
 		delete(j.submissions, id)
 		p.jm.Unlock()
-		if sub, exist := p.submissions.Load(id); exist && p.IsPending(id) {
-			p.pending.Delete(id)
-			p.Push(sub, true)
+		if sub, exist := p.submissions.Get(id); exist && p.IsPending(id) {
+			p.pending.Remove(id)
+			p.push(sub, true)
 		}
 		return
 	}
 }
 
-func (p *Polar) destroy(judgeId string) {
+func (p *Polar) destroy(judgeId uint32) {
 	p.jm.Lock()
 	judgeObj := p.judges[judgeId]
 	p.parallelism -= uint16(judgeObj.Parallelism)
@@ -137,7 +103,8 @@ func (p *Polar) destroy(judgeId string) {
 	p.jm.Unlock()
 	judgeObj.m.Lock()
 	for _, rt := range judgeObj.Runtimes {
-		if q, _ok := p.queued.Load(rt.Id); _ok {
+		if q, _ok := p.queued.Get(rt.Id); _ok {
+			// minus one
 			q.count.Add(^uint32(0))
 		}
 	}
@@ -145,4 +112,93 @@ func (p *Polar) destroy(judgeId string) {
 		p.releaseSubmission(judgeObj, id)
 	}
 	judgeObj.m.Unlock()
+}
+
+func loadRuntimeDefinitions() (defs []*pb.RuntimeDefinition, e error) {
+	buf, e := os.ReadFile("runtime_definitions.json")
+	if e != nil {
+		return
+	}
+	e = json.Unmarshal(buf, &defs)
+	if len(defs) == 0 {
+		e = errors.New("runtime definitions are empty")
+	}
+	return
+}
+
+func (p *Polar) getPendingSubmissions() (r []*pb.Submission) {
+	submissions := di.C(p.ctx).DB().Acquire().Submission.Query().
+		WithProblem(func(query *db.ProblemQuery) {
+			query.Select(problem.FieldID, problem.FieldTestCount)
+		}).
+		Order(submission.ByCreatedAt(sql.OrderDesc())).
+		AllX(p.ctx)
+	r = make([]*pb.Submission, len(submissions))
+	for i, s := range submissions {
+		r[i] = s.Polarize(s.Edges.Problem)
+	}
+	return
+}
+
+func (p *Polar) handleResult(ctx context.Context) func(*pb.Result) bool {
+	lastNonAcVerdict := pb.CaseVerdict_ACCEPTED
+	tx, e := di.C(ctx).DB().Acquire().Tx(ctx)
+	logger.PanicIfE(e, "error starting db tx")
+	id := ctx.Value("id").(uint32)
+	return func(result *pb.Result) bool {
+		switch res := result.Data.(type) {
+		case *pb.Result_Case:
+			if res.Case.Verdict != pb.CaseVerdict_ACCEPTED {
+				lastNonAcVerdict = res.Case.Verdict
+			}
+			cr := tx.CaseResult.Create().
+				SetOrder(uint16(res.Case.CaseId)).
+				SetFeedback(res.Case.Feedback).
+				SetVerdict(resolveVerdict(res.Case.Verdict)).
+				SetMemory(res.Case.Memory).
+				SetExecutionTime(res.Case.ExecutionTime).
+				SetSubmissionID(id).
+				SaveX(ctx)
+			p.updateResult(id, cr)
+			p.publish(id, sse.Message{
+				Data: *cr,
+			})
+		case *pb.Result_Final:
+			res.Final.LastNonAcVerdict = lastNonAcVerdict
+			fv := getFinalVerdict(res.Final)
+			defer p.DestroySubscribers(id)
+			p.publish(id, sse.Message{
+				Data: bridge.FinalJudgement{
+					CompilerOutput: res.Final.CompilerOutput,
+					Verdict:        fv,
+				},
+			})
+			logger.PanicIfE(tx.Commit(), "error committing submission results")
+			return true
+		case *pb.Result_None:
+			p.publish(id, sse.Message{
+				Data: bridge.Ack{},
+			})
+		}
+		return false
+	}
+}
+
+func (p *Polar) onJudgeConnected(id uint32) error {
+	return di.C(p.ctx).DB().Acquire().Judge.UpdateOneID(id).
+		SetLastConnected(time.Now()).
+		Exec(p.ctx)
+}
+
+func (p *Polar) publish(id uint32, msg sse.Message) {
+	if subscribers, ok := p.subscribers.Get(id); ok {
+		subscribers.m.RLock()
+		for v := subscribers.l.Front(); v != nil; v = v.Next() {
+			select {
+			case v.Value.(chan sse.Message) <- msg:
+			default:
+			}
+		}
+		subscribers.m.RUnlock()
+	}
 }

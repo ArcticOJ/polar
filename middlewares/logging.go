@@ -1,7 +1,7 @@
 package middlewares
 
 import (
-	"github.com/ArcticOJ/blizzard/v0/logger"
+	"github.com/rs/zerolog"
 	"storj.io/drpc"
 	"storj.io/drpc/drpcmetadata"
 	"strings"
@@ -11,9 +11,11 @@ import (
 type (
 	stream struct {
 		drpc.Stream
+		logger *zerolog.Logger
 	}
 	loggingMiddleware struct {
-		next drpc.Handler
+		next   drpc.Handler
+		logger *zerolog.Logger
 	}
 )
 
@@ -27,24 +29,25 @@ func Logging() Middleware {
 
 func (s stream) MsgSend(msg drpc.Message, enc drpc.Encoding) (err error) {
 	err = s.Stream.MsgSend(msg, enc)
-	logger.Polar.Debug().Interface("data", msg).Err(err).Msg("message sent")
+	s.logger.Debug().Interface("data", msg).Err(err).Msg("message sent")
 	return
 }
 
 func (s stream) MsgRecv(msg drpc.Message, enc drpc.Encoding) (err error) {
 	err = s.Stream.MsgRecv(msg, enc)
-	logger.Polar.Debug().Interface("data", msg).Err(err).Msg("message received")
+	s.logger.Debug().Interface("data", msg).Err(err).Msg("message received")
 	return
 }
 
-func (md loggingMiddleware) HandleRPC(_stream drpc.Stream, rpc string) error {
+func (mw loggingMiddleware) HandleRPC(_stream drpc.Stream, rpc string) error {
 	fields := getFields(_stream, rpc)
 	start := time.Now().UTC()
 	s := stream{
 		Stream: _stream,
+		logger: mw.logger,
 	}
-	err := md.next.HandleRPC(s, rpc)
-	logger.Polar.Debug().
+	err := mw.next.HandleRPC(s, rpc)
+	mw.logger.Debug().
 		Stringer("duration", time.Now().UTC().Sub(start)).
 		Stringer("start", start).
 		Err(err).
